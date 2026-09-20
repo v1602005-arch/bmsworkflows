@@ -1,0 +1,137 @@
+name: Public Runner - Advance
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_code:
+        description: Optional YYYYMMDD override. If empty, defaults to tomorrow (IST).
+        required: false
+        type: string
+  schedule:
+    - cron: "0 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-runner-advance
+  cancel-in-progress: false
+
+jobs:
+  run-advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PRIVATE_SCRAPER_REPO: ${{ secrets.PRIVATE_SCRAPER_REPO }}
+      PRIVATE_REPO_READ_TOKEN: ${{ secrets.PRIVATE_REPO_READ_TOKEN }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      INPUT_DATE_CODE: ${{ github.event.inputs.date_code || '' }}
+
+    steps:
+      - name: Preflight validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${PRIVATE_SCRAPER_REPO##*/}"
+          missing=0
+          for key in PRIVATE_SCRAPER_REPO PRIVATE_REPO_READ_TOKEN R2_ACCOUNT_ID R2_ACCESS_KEY R2_SECRET_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is required"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_SCRAPER_REPO }}
+          ref: railway-job
+          token: ${{ env.PRIVATE_REPO_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        working-directory: private-src
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        working-directory: private-src
+        run: python -m playwright install --with-deps chromium
+
+      - name: Resolve DATE_CODE
+        shell: bash
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          import os
+
+          override = (os.getenv("INPUT_DATE_CODE") or "").strip()
+          ist = timezone(timedelta(hours=5, minutes=30))
+          value = (override or (datetime.now(ist) + timedelta(days=1)).strftime("%Y%m%d")).strip()
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+            f.write(f"DATE_CODE={value}\n")
+
+          print(f"Using DATE_CODE={value!r}")
+          PY
+
+      - name: Sanitize DATE_CODE
+        shell: bash
+        run: |
+          DATE_CODE="$(printf '%s' "${DATE_CODE}" | tr -d '\r\n' | xargs)"
+          echo "DATE_CODE=$DATE_CODE" >> "$GITHUB_ENV"
+
+      - name: Kick S9
+        shell: bash
+        env:
+          RAILWAY_DISTRICT_URL: ${{ secrets.RAILWAY_DISTRICT_URL }}
+          DISTRICT_TRIGGER_SECRET: ${{ secrets.DISTRICT_TRIGGER_SECRET }}
+          DATE_CODE: ${{ env.DATE_CODE }}
+        run: |
+          set -uo pipefail
+          echo "Triggering remote shard for $DATE_CODE ..."
+          code=$(curl -sS -o /tmp/remote-shard.json -w '%{http_code}' -X POST \
+            -H "X-Auth: $DISTRICT_TRIGGER_SECRET" --max-time 300 \
+            "$RAILWAY_DISTRICT_URL/run-district?mode=advance&date=$DATE_CODE" || echo 000)
+          echo "Remote shard HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::warning::Remote shard trigger failed (HTTP $code) - combine will use the last copy in R2"
+          fi
+      - name: Scrape
+        working-directory: private-src
+        env:
+          SCRAPE_MODE: advance
+          SHARD_IDS: 1-8
+          DATE_CODE: ${{ env.DATE_CODE }}
+          R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ env.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ env.R2_SECRET_KEY }}
+          R2_BUCKET_NAME: ${{ env.R2_BUCKET_NAME }}
+        run: xvfb-run -a python railway_runner.py
+
+      - name: Verify R2 upload
+        working-directory: private-src
+        env:
+          DATE_CODE: ${{ env.DATE_CODE }}
+          R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ env.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ env.R2_SECRET_KEY }}
+          R2_BUCKET_NAME: ${{ env.R2_BUCKET_NAME }}
+        run: python verify_r2_outputs.py --mode advance --date "$DATE_CODE"
