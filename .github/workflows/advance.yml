@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.PRIVATE_SCRAPER_REPO }}
-          ref: railway-job
+          ref: main
           token: ${{ env.PRIVATE_REPO_READ_TOKEN }}
           path: private-src
           persist-credentials: false
@@ -109,7 +109,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/advance/data/ || true
+          git add advance/data/ || true
           git commit -m "BMS Advance Scrape (${{ env.DATE_CODE }})" || echo "No changes"
-          git pull --rebase origin railway-job || true
-          git push origin railway-job || true
+          git pull --rebase origin main || true
+          git push origin main || true
