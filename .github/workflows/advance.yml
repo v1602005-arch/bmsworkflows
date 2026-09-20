@@ -105,11 +105,19 @@ jobs:
       - name: Commit & Push
         working-directory: private-src
         env:
-          GITHUB_TOKEN: ${{ env.PRIVATE_REPO_READ_TOKEN }}
+          PRIVATE_REPO_READ_TOKEN: ${{ env.PRIVATE_REPO_READ_TOKEN }}
+          PRIVATE_SCRAPER_REPO: ${{ env.PRIVATE_SCRAPER_REPO }}
+          DATE_CODE: ${{ env.DATE_CODE }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add advance/data/ || true
-          git commit -m "BMS Advance Scrape (${{ env.DATE_CODE }})" || echo "No changes"
-          git pull --rebase origin main || true
-          git push origin main || true
+          git add advance/data/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "BMS Advance Scrape (${DATE_CODE})"
+          git remote set-url origin "https://x-access-token:${PRIVATE_REPO_READ_TOKEN}@github.com/${PRIVATE_SCRAPER_REPO}.git"
+          git pull --rebase origin main
+          git push origin main
