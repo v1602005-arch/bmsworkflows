@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: public-runner-advance-date
@@ -19,10 +19,6 @@ jobs:
     env:
       PRIVATE_SCRAPER_REPO: ${{ secrets.PRIVATE_SCRAPER_REPO }}
       PRIVATE_REPO_READ_TOKEN: ${{ secrets.PRIVATE_REPO_READ_TOKEN }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
-      R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
     steps:
       - name: Preflight validation
@@ -31,7 +27,7 @@ jobs:
           set -euo pipefail
           echo "::add-mask::${PRIVATE_SCRAPER_REPO##*/}"
           missing=0
-          for key in PRIVATE_SCRAPER_REPO PRIVATE_REPO_READ_TOKEN R2_ACCOUNT_ID R2_ACCESS_KEY R2_SECRET_KEY; do
+          for key in PRIVATE_SCRAPER_REPO PRIVATE_REPO_READ_TOKEN; do
             if [ -z "${!key:-}" ]; then
               echo "::error::$key is required"
               missing=1
@@ -72,40 +68,22 @@ jobs:
       - name: Set DATE_CODE
         run: echo "DATE_CODE=20260925" >> "$GITHUB_ENV"
 
-      - name: Kick S9
-        shell: bash
-        env:
-          RAILWAY_DISTRICT_URL: ${{ secrets.RAILWAY_DISTRICT_URL }}
-          DISTRICT_TRIGGER_SECRET: ${{ secrets.DISTRICT_TRIGGER_SECRET }}
-          DATE_CODE: ${{ env.DATE_CODE }}
-        run: |
-          set -uo pipefail
-          echo "Triggering remote shard for $DATE_CODE ..."
-          code=$(curl -sS -o /tmp/remote-shard.json -w '%{http_code}' -X POST \
-            -H "X-Auth: $DISTRICT_TRIGGER_SECRET" --max-time 300 \
-            "$RAILWAY_DISTRICT_URL/run-district?mode=advance&date=$DATE_CODE" || echo 000)
-          echo "Remote shard HTTP $code"
-          if [ "$code" != "200" ]; then
-            echo "::warning::Remote shard trigger failed (HTTP $code) - combine will use the last copy in R2"
-          fi
       - name: Scrape
         working-directory: private-src
         env:
           SCRAPE_MODE: advance
-          SHARD_IDS: 1-8
+          SHARD_IDS: 1-9
           DATE_CODE: ${{ env.DATE_CODE }}
-          R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY: ${{ env.R2_ACCESS_KEY }}
-          R2_SECRET_KEY: ${{ env.R2_SECRET_KEY }}
-          R2_BUCKET_NAME: ${{ env.R2_BUCKET_NAME }}
         run: xvfb-run -a python railway_runner.py
 
-      - name: Verify R2 upload
+      - name: Commit & Push
         working-directory: private-src
         env:
-          DATE_CODE: ${{ env.DATE_CODE }}
-          R2_ACCOUNT_ID: ${{ env.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY: ${{ env.R2_ACCESS_KEY }}
-          R2_SECRET_KEY: ${{ env.R2_SECRET_KEY }}
-          R2_BUCKET_NAME: ${{ env.R2_BUCKET_NAME }}
-        run: python verify_r2_outputs.py --mode advance --date "$DATE_CODE"
+          GITHUB_TOKEN: ${{ env.PRIVATE_REPO_READ_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/advance/data/ || true
+          git commit -m "BMS Advance Date Scrape (${{ env.DATE_CODE }})" || echo "No changes"
+          git pull --rebase origin railway-job || true
+          git push origin railway-job || true
